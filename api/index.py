@@ -8,7 +8,7 @@ from pydantic import BaseModel
 
 app = FastAPI()
 
-# Enable CORS for all origins
+# Enable CORS for all origins and headers
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -17,7 +17,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Load data on startup
+# Load telemetry data
 DATA_FILE = Path(__file__).parent / "q-vercel-latency.json"
 with open(DATA_FILE, "r", encoding="utf-8") as f:
     TELEMETRY_DATA: List[Dict[str, Any]] = json.load(f)
@@ -28,12 +28,23 @@ class RequestPayload(BaseModel):
     threshold_ms: float
 
 
+# Health check route for GET requests
+@app.get("/")
+@app.get("/latency")
+@app.get("/api/latency")
+def health_check():
+    return {"status": "ok"}
+
+
+# Handle POST requests across both path variants
 @app.post("/api/latency")
+@app.post("/latency")
+@app.post("/api/latency/")
+@app.post("/latency/")
 async def calculate_latency(payload: RequestPayload):
     req_regions = set(payload.regions)
     threshold = payload.threshold_ms
 
-    # Group data by requested regions
     grouped: Dict[str, List[Dict[str, Any]]] = {r: [] for r in req_regions}
     for item in TELEMETRY_DATA:
         reg = item.get("region")
@@ -54,11 +65,11 @@ async def calculate_latency(payload: RequestPayload):
             continue
 
         latencies = [
-            float(x.get("latency", x.get("latency_ms", 0.0))) 
+            float(x.get("latency", x.get("latency_ms", 0.0)))
             for x in items
         ]
         uptimes = [
-            float(x.get("uptime", x.get("uptime_pct", 0.0))) 
+            float(x.get("uptime", x.get("uptime_pct", 0.0)))
             for x in items
         ]
 
@@ -70,5 +81,4 @@ async def calculate_latency(payload: RequestPayload):
             "breaches": int(sum(1 for lat in latencies if lat > threshold)),
         })
 
-    # Return per-region metrics
     return {"regions": regions_output}
