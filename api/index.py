@@ -1,35 +1,23 @@
 import json
-import os
 from pathlib import Path
 from statistics import mean
+from typing import List
 
-from fastapi import FastAPI, Request
-from fastapi.responses import Response
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
+from pydantic import BaseModel
 
 app = FastAPI()
 
+# Enable CORS for every origin, including POST preflight requests.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["*"],
 )
-@app.middleware("http")
-async def ensure_cors_headers(request: Request, call_next):
-    if request.method == "OPTIONS":
-        response = Response(status_code=200)
-    else:
-        response = await call_next(request)
-
-    response.headers["Access-Control-Allow-Origin"] = "*"
-    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-    response.headers["Access-Control-Allow-Headers"] = "*"
-    return response
-
-
 
 DATA_FILE = Path(__file__).resolve().parent.parent / "q-vercel-latency.json"
 
@@ -58,10 +46,10 @@ def collect_records(obj):
 
             if region is not None and latency is not None:
                 records.append(value)
-
-            for child in value.values():
-                if isinstance(child, (dict, list)):
-                    walk(child)
+            else:
+                for child in value.values():
+                    if isinstance(child, (dict, list)):
+                        walk(child)
 
         elif isinstance(value, list):
             for child in value:
@@ -73,7 +61,6 @@ def collect_records(obj):
 
 def percentile_95(values):
     values = sorted(values)
-
     if len(values) == 1:
         return float(values[0])
 
@@ -82,9 +69,20 @@ def percentile_95(values):
     upper = min(lower + 1, len(values) - 1)
     fraction = position - lower
 
-    return values[lower] + (
-        values[upper] - values[lower]
-    ) * fraction
+    return values[lower] + (values[upper] - values[lower]) * fraction
+
+
+@app.middleware("http")
+async def ensure_cors_headers(request: Request, call_next):
+    if request.method == "OPTIONS":
+        response = Response(status_code=204)
+    else:
+        response = await call_next(request)
+
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "*"
+    response.headers["Access-Control-Allow-Headers"] = "*"
+    return response
 
 
 @app.post("/")
@@ -92,22 +90,16 @@ def percentile_95(values):
 @app.post("/api/index")
 def latency_metrics(body: RequestBody):
     if not DATA_FILE.exists():
-        raise HTTPException(
-            status_code=500,
-            detail="Telemetry JSON file not found",
-        )
+        raise HTTPException(status_code=500, detail="Telemetry file not found")
 
     try:
         with open(DATA_FILE, "r", encoding="utf-8") as file:
             data = json.load(file)
     except (OSError, json.JSONDecodeError):
-        raise HTTPException(
-            status_code=500,
-            detail="Unable to read telemetry data",
-        )
+        raise HTTPException(status_code=500, detail="Unable to read telemetry")
 
     records = collect_records(data)
-    results = []
+    results = {}
 
     for region in body.regions:
         selected = [
@@ -119,37 +111,31 @@ def latency_metrics(body: RequestBody):
         if not selected:
             raise HTTPException(
                 status_code=404,
-                detail=f"No telemetry records for region: {region}",
+                detail=f"No records found for region: {region}",
             )
 
         latencies = [
             float(get_value(
-                record,
-                ["latency_ms", "latency", "response_time_ms"]
+                record, ["latency_ms", "latency", "response_time_ms"]
             ))
             for record in selected
         ]
 
-        uptimes = [
-            float(get_value(
-                record,
-                ["uptime", "uptime_pct", "uptime_percent"]
-            ))
+        uptime_values = [
+            float(value)
             for record in selected
-            if get_value(
-                record,
-                ["uptime", "uptime_pct", "uptime_percent"]
-            ) is not None
+            if (value := get_value(
+                record, ["uptime", "uptime_pct", "uptime_percent"]
+            )) is not None
         ]
 
-        results.append({
-            "region": region,
+        results[region] = {
             "avg_latency": mean(latencies),
             "p95_latency": percentile_95(latencies),
-            "avg_uptime": mean(uptimes) if uptimes else 0,
+            "avg_uptime": mean(uptime_values) if uptime_values else 0,
             "breaches": sum(
                 latency > body.threshold_ms for latency in latencies
             ),
-        })
+        }
 
     return {"regions": results}
