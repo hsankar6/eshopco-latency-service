@@ -1,21 +1,35 @@
-```python
 import json
 import os
 from pathlib import Path
 from statistics import mean
-from fastapi import FastAPI, HTTPException
+```python
+from fastapi import FastAPI, Request
+from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import List
 
 app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_methods=["POST", "OPTIONS"],
+    allow_credentials=False,
+    allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
+@app.middleware("http")
+async def ensure_cors_headers(request: Request, call_next):
+    if request.method == "OPTIONS":
+        response = Response(status_code=200)
+    else:
+        response = await call_next(request)
+
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "*"
+    return response
+
+
 
 DATA_FILE = Path(__file__).resolve().parent.parent / "q-vercel-latency.json"
 
@@ -139,4 +153,3 @@ def latency_metrics(body: RequestBody):
         })
 
     return {"regions": results}
-```
