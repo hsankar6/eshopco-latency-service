@@ -7,42 +7,75 @@ from fastapi.responses import JSONResponse
 
 app = FastAPI()
 
-# Locate and load the telemetry data file safely
-BASE_DIR = Path(__file__).resolve().parent
-DATA_FILE = BASE_DIR / "q-vercel-latency.json"
-if not DATA_FILE.exists():
-    DATA_FILE = BASE_DIR.parent / "q-vercel-latency.json"
 
-TELEMETRY_DATA: List[Dict[str, Any]] = []
-if DATA_FILE.exists():
-    with open(DATA_FILE, "r", encoding="utf-8") as f:
-        TELEMETRY_DATA = json.load(f)
+# 1. Guaranteed CORS Middleware
+@app.middleware("http")
+async def cors_middleware(request: Request, call_next):
+    # Respond immediately to preflight OPTIONS requests
+    if request.method == "OPTIONS":
+        res = Response(status_code=200)
+        res.headers["Access-Control-Allow-Origin"] = "*"
+        res.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        res.headers["Access-Control-Allow-Headers"] = "*"
+        return res
+
+    try:
+        response = await call_next(request)
+    except Exception as exc:
+        response = JSONResponse(status_code=500, content={"error": str(exc)})
+
+    # Unconditionally attach the required CORS header
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "*"
+    return response
 
 
-def calculate_p95(values: List[float]) -> float:
+# 2. Locate and load telemetry data
+def load_data():
+    search_paths = [
+        Path(__file__).resolve().parent / "q-vercel-latency.json",
+        Path(__file__).resolve().parent.parent / "q-vercel-latency.json",
+        Path.cwd() / "q-vercel-latency.json",
+        Path.cwd() / "api" / "q-vercel-latency.json",
+    ]
+    for p in search_paths:
+        if p.exists():
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                pass
+    return []
+
+
+TELEMETRY_DATA: List[Dict[str, Any]] = load_data()
+
+
+def get_p95(values: List[float]) -> float:
     if not values:
         return 0.0
-    sorted_vals = sorted(values)
-    k = (len(sorted_vals) - 1) * 0.95
+    s = sorted(values)
+    k = (len(s) - 1) * 0.95
     f = math.floor(k)
     c = math.ceil(k)
     if f == c:
-        return float(sorted_vals[int(k)])
-    return float(sorted_vals[f] * (c - k) + sorted_vals[c] * (k - f))
+        return float(s[int(k)])
+    return float(s[f] * (c - k) + s[c] * (k - f))
 
 
-def process_telemetry(payload: dict):
-    req_regions = set(payload.get("regions", []))
+def process_request(payload: dict):
+    req_regions = [str(r).lower() for r in payload.get("regions", [])]
     threshold = float(payload.get("threshold_ms", 180))
 
     grouped: Dict[str, List[Dict[str, Any]]] = {r: [] for r in req_regions}
     for item in TELEMETRY_DATA:
-        reg = item.get("region")
-        if reg in req_regions:
+        reg = str(item.get("region", "")).lower()
+        if reg in grouped:
             grouped[reg].append(item)
 
     results = {}
-    for reg in payload.get("regions", []):
+    for reg in req_regions:
         items = grouped.get(reg, [])
         if not items:
             results[reg] = {
@@ -64,7 +97,7 @@ def process_telemetry(payload: dict):
 
         results[reg] = {
             "avg_latency": round(sum(latencies) / len(latencies), 2),
-            "p95_latency": round(calculate_p95(latencies), 2),
+            "p95_latency": round(get_p95(latencies), 2),
             "avg_uptime": round(sum(uptimes) / len(uptimes), 4),
             "breaches": sum(1 for lat in latencies if lat > threshold),
         }
@@ -72,23 +105,23 @@ def process_telemetry(payload: dict):
     return results
 
 
-# Preflight handler (returns 200 for any OPTIONS call)
+# 3. Route Handlers
 @app.options("/{full_path:path}")
-async def handle_options(full_path: str):
-    return Response(status_code=200)
+async def options_route(full_path: str):
+    res = Response(status_code=200)
+    res.headers["Access-Control-Allow-Origin"] = "*"
+    return res
 
 
-# Health check for browser GET requests
 @app.get("/{full_path:path}")
-async def handle_get(full_path: str):
+async def get_route(full_path: str):
     return {"status": "ok", "message": "Endpoint is live."}
 
 
-# Catch-all POST handler
 @app.post("/{full_path:path}")
-async def handle_post(request: Request, full_path: str):
+async def post_route(request: Request, full_path: str):
     try:
-        payload = await request.json()
+        body = await request.json()
     except Exception:
-        payload = {}
-    return process_telemetry(payload)
+        body = {}
+    return process_request(body)
