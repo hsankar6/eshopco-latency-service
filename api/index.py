@@ -2,7 +2,7 @@ import json
 import os
 from pathlib import Path
 from statistics import mean
-```python
+
 from fastapi import FastAPI, Request
 from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
