@@ -9,12 +9,18 @@ from pydantic import BaseModel
 app = FastAPI()
 
 # CORS: allow POST (and preflight OPTIONS) from any origin
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+from fastapi import Request, Response
+
+@app.middleware("http")
+async def add_cors(request: Request, call_next):
+    if request.method == "OPTIONS":
+        response = Response(status_code=204)
+    else:
+        response = await call_next(request)
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "*"
+    return response
 
 DATA_FILE = Path(__file__).resolve().parent.parent / "q-vercel-latency.json"
 
