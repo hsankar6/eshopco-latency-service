@@ -1,87 +1,142 @@
+```python
 import json
+import os
 from pathlib import Path
-from typing import List
-
-from fastapi import FastAPI
+from statistics import mean
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from typing import List
 
 app = FastAPI()
 
-# CORS: allow POST (and preflight OPTIONS) from any origin
-from fastapi import Request, Response
-
-@app.middleware("http")
-async def add_cors(request: Request, call_next):
-    if request.method == "OPTIONS":
-        response = Response(status_code=204)
-    else:
-        response = await call_next(request)
-    response.headers["Access-Control-Allow-Origin"] = "*"
-    response.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
-    response.headers["Access-Control-Allow-Headers"] = "*"
-    return response
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["POST", "OPTIONS"],
+    allow_headers=["*"],
+)
 
 DATA_FILE = Path(__file__).resolve().parent.parent / "q-vercel-latency.json"
 
 
-def load_records():
-    with open(DATA_FILE) as f:
-        data = json.load(f)
-    # Support either a bare list or {"records": [...]} / {"data": [...]}
-    if isinstance(data, dict):
-        for key in ("records", "data", "telemetry"):
-            if key in data:
-                return data[key]
-    return data
-
-
-RECORDS = load_records()
-
-
-class Query(BaseModel):
+class RequestBody(BaseModel):
     regions: List[str]
-    threshold_ms: float
+    threshold_ms: float = 180
 
 
-def mean(xs):
-    return sum(xs) / len(xs) if xs else 0.0
+def get_value(record, keys):
+    for key in keys:
+        if key in record:
+            return record[key]
+    return None
 
 
-def percentile(xs, p):
-    """Linear-interpolation percentile (same as numpy default)."""
-    if not xs:
-        return 0.0
-    s = sorted(xs)
-    k = (len(s) - 1) * p / 100
-    lo, hi = int(k), min(int(k) + 1, len(s) - 1)
-    return s[lo] + (s[hi] - s[lo]) * (k - lo)
+def collect_records(obj):
+    records = []
+
+    def walk(value):
+        if isinstance(value, dict):
+            region = get_value(value, ["region", "region_name"])
+            latency = get_value(
+                value, ["latency_ms", "latency", "response_time_ms"]
+            )
+
+            if region is not None and latency is not None:
+                records.append(value)
+
+            for child in value.values():
+                if isinstance(child, (dict, list)):
+                    walk(child)
+
+        elif isinstance(value, list):
+            for child in value:
+                walk(child)
+
+    walk(obj)
+    return records
 
 
-def uptime_of(r):
-    for key in ("uptime_pct", "uptime", "uptime_percent"):
-        if key in r:
-            return r[key]
-    return 0.0
+def percentile_95(values):
+    values = sorted(values)
 
+    if len(values) == 1:
+        return float(values[0])
 
-def compute(q: Query):
-    result = {}
-    for region in q.regions:
-        rows = [r for r in RECORDS if str(r.get("region", "")).lower() == region.lower()]
-        lat = [r["latency_ms"] for r in rows]
-        result[region] = {
-            "avg_latency": mean(lat),
-            "p95_latency": percentile(lat, 95),
-            "avg_uptime": mean([uptime_of(r) for r in rows]),
-            "breaches": sum(1 for x in lat if x > q.threshold_ms),
-        }
-    return {"regions": result}
+    position = (len(values) - 1) * 0.95
+    lower = int(position)
+    upper = min(lower + 1, len(values) - 1)
+    fraction = position - lower
+
+    return values[lower] + (
+        values[upper] - values[lower]
+    ) * fraction
 
 
 @app.post("/")
 @app.post("/api")
 @app.post("/api/index")
-@app.post("/api/latency")
-def latency(q: Query):
-    return compute(q)
+def latency_metrics(body: RequestBody):
+    if not DATA_FILE.exists():
+        raise HTTPException(
+            status_code=500,
+            detail="Telemetry JSON file not found",
+        )
+
+    try:
+        with open(DATA_FILE, "r", encoding="utf-8") as file:
+            data = json.load(file)
+    except (OSError, json.JSONDecodeError):
+        raise HTTPException(
+            status_code=500,
+            detail="Unable to read telemetry data",
+        )
+
+    records = collect_records(data)
+    results = []
+
+    for region in body.regions:
+        selected = [
+            record for record in records
+            if str(get_value(record, ["region", "region_name"])).lower()
+            == region.lower()
+        ]
+
+        if not selected:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No telemetry records for region: {region}",
+            )
+
+        latencies = [
+            float(get_value(
+                record,
+                ["latency_ms", "latency", "response_time_ms"]
+            ))
+            for record in selected
+        ]
+
+        uptimes = [
+            float(get_value(
+                record,
+                ["uptime", "uptime_pct", "uptime_percent"]
+            ))
+            for record in selected
+            if get_value(
+                record,
+                ["uptime", "uptime_pct", "uptime_percent"]
+            ) is not None
+        ]
+
+        results.append({
+            "region": region,
+            "avg_latency": mean(latencies),
+            "p95_latency": percentile_95(latencies),
+            "avg_uptime": mean(uptimes) if uptimes else 0,
+            "breaches": sum(
+                latency > body.threshold_ms for latency in latencies
+            ),
+        })
+
+    return {"regions": results}
+```
