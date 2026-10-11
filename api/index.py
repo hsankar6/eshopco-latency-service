@@ -2,22 +2,35 @@ import json
 from pathlib import Path
 from typing import List, Dict, Any
 import numpy as np
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 app = FastAPI()
 
-# Enable CORS for all origins, headers, and methods
+# Enable CORS middleware with wildcard origin
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Load data on startup
+# Custom middleware to guarantee the CORS header is on every response
+@app.middleware("http")
+async def add_cors_headers(request: Request, call_next):
+    if request.method == "OPTIONS":
+        response = Response(status_code=200)
+    else:
+        response = await call_next(request)
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "*"
+    return response
+
+
+# Load telemetry data
 DATA_FILE = Path(__file__).parent / "q-vercel-latency.json"
 with open(DATA_FILE, "r", encoding="utf-8") as f:
     TELEMETRY_DATA: List[Dict[str, Any]] = json.load(f)
@@ -66,14 +79,34 @@ def calculate(payload: dict):
     return {"regions": regions_output}
 
 
-# Catch-all GET handler so browser tests show "ok" instead of 404
+# Respond to preflight OPTIONS requests
+@app.options("/{full_path:path}")
+async def options_handler(full_path: str):
+    return Response(
+        status_code=200,
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+        },
+    )
+
+
+# Health check for GET
 @app.get("/{full_path:path}")
 async def catch_all_get(full_path: str):
-    return {"status": "ok", "path_received": full_path}
+    return JSONResponse(
+        content={"status": "ok", "path_received": full_path},
+        headers={"Access-Control-Allow-Origin": "*"},
+    )
 
 
-# Catch-all POST handler to handle /, /latency, /api/latency regardless of rewrites
+# POST handler for metric calculation
 @app.post("/{full_path:path}")
 async def catch_all_post(request: Request, full_path: str):
     payload = await request.json()
-    return calculate(payload)
+    result = calculate(payload)
+    return JSONResponse(
+        content=result,
+        headers={"Access-Control-Allow-Origin": "*"},
+    )
