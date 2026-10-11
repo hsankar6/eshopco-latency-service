@@ -2,13 +2,13 @@ import json
 from pathlib import Path
 from typing import List, Dict, Any
 import numpy as np
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from fastapi.responses import JSONResponse
 
 app = FastAPI()
 
-# Enable CORS for all origins and headers
+# Enable CORS for all origins, headers, and methods
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -17,33 +17,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Load telemetry data
+# Load telemetry bundle
 DATA_FILE = Path(__file__).parent / "q-vercel-latency.json"
 with open(DATA_FILE, "r", encoding="utf-8") as f:
     TELEMETRY_DATA: List[Dict[str, Any]] = json.load(f)
 
 
-class RequestPayload(BaseModel):
-    regions: List[str]
-    threshold_ms: float
-
-
-# Health check route for GET requests
-@app.get("/")
-@app.get("/latency")
-@app.get("/api/latency")
-def health_check():
-    return {"status": "ok"}
-
-
-# Handle POST requests across both path variants
-@app.post("/api/latency")
-@app.post("/latency")
-@app.post("/api/latency/")
-@app.post("/latency/")
-async def calculate_latency(payload: RequestPayload):
-    req_regions = set(payload.regions)
-    threshold = payload.threshold_ms
+def compute_metrics(payload: dict):
+    req_regions = set(payload.get("regions", []))
+    threshold = float(payload.get("threshold_ms", 180))
 
     grouped: Dict[str, List[Dict[str, Any]]] = {r: [] for r in req_regions}
     for item in TELEMETRY_DATA:
@@ -52,7 +34,7 @@ async def calculate_latency(payload: RequestPayload):
             grouped[reg].append(item)
 
     regions_output = []
-    for reg in payload.regions:
+    for reg in payload.get("regions", []):
         items = grouped.get(reg, [])
         if not items:
             regions_output.append({
@@ -82,3 +64,20 @@ async def calculate_latency(payload: RequestPayload):
         })
 
     return {"regions": regions_output}
+
+
+# Browser health check (GET) across all routes
+@app.get("/")
+@app.get("/latency")
+@app.get("/api/latency")
+async def health_check():
+    return {"status": "ok", "message": "Service is live and ready for POST requests."}
+
+
+# Handle POST requests across all path variations
+@app.post("/")
+@app.post("/latency")
+@app.post("/api/latency")
+async def handle_post(request: Request):
+    payload = await request.json()
+    return compute_metrics(payload)
