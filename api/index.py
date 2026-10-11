@@ -17,13 +17,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Load telemetry bundle
+# Load data on startup
 DATA_FILE = Path(__file__).parent / "q-vercel-latency.json"
 with open(DATA_FILE, "r", encoding="utf-8") as f:
     TELEMETRY_DATA: List[Dict[str, Any]] = json.load(f)
 
 
-def compute_metrics(payload: dict):
+def calculate(payload: dict):
     req_regions = set(payload.get("regions", []))
     threshold = float(payload.get("threshold_ms", 180))
 
@@ -66,18 +66,14 @@ def compute_metrics(payload: dict):
     return {"regions": regions_output}
 
 
-# Browser health check (GET) across all routes
-@app.get("/")
-@app.get("/latency")
-@app.get("/api/latency")
-async def health_check():
-    return {"status": "ok", "message": "Service is live and ready for POST requests."}
+# Catch-all GET handler so browser tests show "ok" instead of 404
+@app.get("/{full_path:path}")
+async def catch_all_get(full_path: str):
+    return {"status": "ok", "path_received": full_path}
 
 
-# Handle POST requests across all path variations
-@app.post("/")
-@app.post("/latency")
-@app.post("/api/latency")
-async def handle_post(request: Request):
+# Catch-all POST handler to handle /, /latency, /api/latency regardless of rewrites
+@app.post("/{full_path:path}")
+async def catch_all_post(request: Request, full_path: str):
     payload = await request.json()
-    return compute_metrics(payload)
+    return calculate(payload)
